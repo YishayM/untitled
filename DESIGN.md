@@ -87,6 +87,7 @@
 | Alert delivery | HTTP API / DB table / structured log | Structured log (SLF4J + logstash-logback-encoder) | Zero infrastructure; observable; auditable; no extra API surface | Not queryable after the fact — acceptable per requirement |
 | Services lookup | DB query per alert / in-memory map | ConcurrentHashMap warmed at startup | services table is small and infrequently updated; eliminates DB hotspot on alert path | Stale for milliseconds after PUT — acceptable (synchronous invalidation on write) |
 | Seen-triples cache | None / Caffeine bounded / unbounded HashMap | Caffeine maximumSize(100_000) | Unbounded HashMap causes OOM under adversarial workloads; Caffeine is thread-safe LRU | Cache eviction under memory pressure means DB fallback — still correct, just slower |
+| Values-per-event limit | No limit / request-level cap | 100 values per event, enforced at HTTP boundary before queuing | Prevents a single adversarial event with thousands of fields from monopolising worker threads; validated synchronously so no malformed work enters the queue | Legitimate events with >100 fields are rejected with 400 — callers must split them |
 | Schema migration | Flyway / Liquibase / schema.sql | schema.sql (spring.sql.init.mode=always) | Schema is constant for this exercise; no versioning overhead needed | Not suitable for production schema evolution |
 | Multi-tenancy | Separate schema / row-level account_id | Row-level account_id composite PK everywhere | Simple; no DDL per tenant; supports sharding later by account_id range | Every query must include account_id — enforced by convention |
 | Events persistence | Store raw events table / skip | Skip (no events table) | No query path consumes raw events; seen_triples captures all meaningful derived state; raw storage adds high-volume write with no consumer | Spec says "save to DB" — seen_triples satisfies this; raw event history not queryable |
@@ -137,6 +138,27 @@ CREATE TABLE IF NOT EXISTS seen_triples (
 | Event with >100 value fields | 400 Bad Request at HTTP boundary (before queuing) | Yes — prevents worker starvation from adversarially wide events |
 | services ConcurrentHashMap stale by milliseconds after PUT | Next alert after PUT may use old flag | Yes — synchronous update on write path minimizes window |
 | GET /graph on large account | Full table scan on seen_triples for account | Acceptable for this scale; add index if needed |
+
+---
+
+## System Limits
+
+All hard limits are enforced in code. This table is the single source of truth for operators and reviewers.
+
+| Limit | Value | Enforced In | Breach Behaviour |
+|---|---|---|---|
+| Ingestion queue depth | 50,000 batches | `WorkerPoolConfig.QUEUE_CAPACITY` | `POST /events` → 503 Service Unavailable; sensor must retry |
+| Values per event | 100 fields | `EventIngestionController.MAX_VALUES_PER_EVENT` | `POST /events` → 400 Bad Request; entire batch rejected before queuing |
+| Worker thread pool | 2 × CPU cores (e.g. 22 on 11-core host) | `WorkerPoolConfig.N_WORKERS` | Excess batches queue up; latency rises; 503 if queue fills |
+| HikariCP connection pool | = N_WORKERS | `WorkerPoolConfig` (set programmatically) | Sized to match workers exactly — no worker ever waits for a connection |
+| Novelty cache (Caffeine) | 100,000 entries | `CaffeineNoveltyCache.maximumSize` | LRU eviction; evicted triples fall back to DB check — correct but slower |
+| Services cache | Unbounded `ConcurrentHashMap` | `ServiceCache` | Intentional: services table is small and operator-controlled; unbounded is safe here |
+| Graceful shutdown timeout | 10 seconds | `WorkerPoolConfig.WorkerPoolShutdown` | Workers still running after 10 s are interrupted; in-flight batches may be dropped |
+
+**Notes:**
+- The queue limit (50k) and values limit (100) are the two limits that produce user-visible error responses.
+- All other limits are internal resource caps with no direct API signal to callers.
+- `docker-compose down` without `-v` **does not** delete the PostgreSQL volume — `seen_triples` persists across container restarts, which is correct production behaviour but can surprise during local testing.
 
 ---
 
