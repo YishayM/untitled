@@ -22,12 +22,17 @@ Alerts appear as structured JSON log lines. No HTTP endpoint for alerts — the 
 ## Run With Docker
 
 ```bash
-./gradlew bootJar
 docker-compose up --build
 ```
 
+The Dockerfile uses a multi-stage build — no pre-built jar required.
 App starts on port 8080. PostgreSQL starts on 5432.
-Schema is loaded automatically on startup.
+Schema is loaded automatically on startup (`spring.sql.init.mode=always`).
+
+To start only the database (for local development with `./gradlew bootRun`):
+```bash
+docker-compose up -d postgres
+```
 
 ---
 
