@@ -27,8 +27,12 @@ public class EventWorker implements Runnable {
         while (!Thread.currentThread().isInterrupted()) {
             try {
                 IncomingBatch batch = queue.take();
-                for (var event : batch.events()) {
-                    alertEngine.process(batch.accountId(), event);
+                try {
+                    for (var event : batch.events()) {
+                        alertEngine.process(batch.accountId(), event);
+                    }
+                } catch (RuntimeException e) {
+                    log.error("EventWorker: unexpected error processing batch, continuing loop", e);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

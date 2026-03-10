@@ -9,6 +9,7 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.stereotype.Component;
 
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Starts the event worker pool after the full application context is ready
@@ -23,6 +24,7 @@ public class WorkerStarter implements ApplicationRunner {
     private final IngestionQueue queue;
     private final AlertEngine alertEngine;
     private final ExecutorService workerPool;
+    private final AtomicBoolean started = new AtomicBoolean(false);
 
     public WorkerStarter(IngestionQueue queue, AlertEngine alertEngine, ExecutorService workerPool) {
         this.queue = queue;
@@ -32,6 +34,10 @@ public class WorkerStarter implements ApplicationRunner {
 
     @Override
     public void run(ApplicationArguments args) {
+        if (!started.compareAndSet(false, true)) {
+            log.warn("WorkerStarter.run() called more than once — ignoring duplicate submission");
+            return;
+        }
         for (int i = 0; i < WorkerPoolConfig.N_WORKERS; i++) {
             workerPool.submit(new EventWorker(queue, alertEngine));
         }

@@ -11,7 +11,7 @@ import org.springframework.stereotype.Component;
  * Replaced by the real AlertEngine in PR4 — remove this class then.
  */
 @Component
-@ConditionalOnMissingBean(name = "sensitiveDataAlertEngine")
+@ConditionalOnMissingBean(AlertEngine.class)
 public class NoOpAlertEngine implements AlertEngine {
 
     private static final Logger log = LoggerFactory.getLogger(NoOpAlertEngine.class);
