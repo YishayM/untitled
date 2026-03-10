@@ -71,10 +71,11 @@ X-Account-ID: <account-id>
 Returns:
 ```json
 {
-  "nodes": [{ "id": "users", "label": "users", "isPublic": false }],
-  "edges": [{ "from": "users", "to": "payment", "classifications": ["FIRST_NAME"] }]
+  "nodes": [{ "id": "users", "label": "users" }],
+  "edges": [{ "from": "users", "to": "payment", "label": "CREDIT_CARD_NUMBER,FIRST_NAME" }]
 }
 ```
+Edge `label` is the sorted comma-separated list of classifications observed on that flow.
 
 ---
 
@@ -147,3 +148,11 @@ See [DESIGN.md](DESIGN.md) for full architecture decisions and trade-offs.
 ### PR3: Async ingestion pipeline
 - **ApplicationRunner for worker startup:** Guarantees `ServiceCacheWarmup` completes before first event is processed — no race on services cache at boot.
 - **503 on queue full (offer=false):** Tomcat thread never blocks on processing; sensor handles backpressure via retry.
+
+### PR4: Alert engine — exactly-once sensitive data flow detection
+- **DB constraint is the exactly-once guarantee, not the cache:** `INSERT ON CONFLICT DO NOTHING` returns 0 or 1 atomically — only the thread that gets 1 fires the alert. Cache is a fast-path optimisation, not the authority.
+- **`markSeen` called unconditionally after DB decision (before alert):** Both the conflict and inserted branches warm the cache at the same point, eliminating asymmetry. Timestamp is stamped at detection entry via injected `Clock`, not after DB+severity latency.
+
+### PR5: GET /graph — vis.js service data-flow graph
+- **Grouping in Java, not SQL:** One row per (source, destination, classification) triple; classifications aggregated into `EnumSet` in Java. Avoids `array_agg` dialect differences and keeps SQL readable.
+- **`LinkedHashSet` for node order, sorted label for edge label:** Encounter-order nodes and alphabetically-sorted classification labels make the response body deterministic and diff-friendly.
