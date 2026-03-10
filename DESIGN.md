@@ -18,6 +18,7 @@
 **Architecture diagram:** `![Architecture](architecture.excalidraw.png)`
 
 ---
+<img width="1572" height="422" alt="image" src="https://github.com/user-attachments/assets/51e95b44-96c7-496f-a70f-d21cdbe6dfcc" />
 
 ## Data Flow
 
