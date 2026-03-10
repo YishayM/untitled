@@ -9,6 +9,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import javax.sql.DataSource;
+import java.time.Clock;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -27,6 +28,16 @@ public class WorkerPoolConfig {
     @Bean
     public IngestionQueue ingestionQueue() {
         return new BoundedIngestionQueue(QUEUE_CAPACITY);
+    }
+
+    /**
+     * UTC system clock injected into SensitiveDataAlertEngine (and any other time-aware
+     * component). Using a bean instead of Instant.now() directly makes the clock
+     * replaceable in tests for deterministic timestamp assertions.
+     */
+    @Bean
+    public Clock clock() {
+        return Clock.systemUTC();
     }
 
     /**

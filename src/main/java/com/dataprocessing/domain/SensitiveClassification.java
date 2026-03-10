@@ -20,11 +20,9 @@ public enum SensitiveClassification {
     }
 
     public static Optional<SensitiveClassification> of(String value) {
-        if (value == null) return Optional.empty();
-        try {
-            return Optional.of(valueOf(value));
-        } catch (IllegalArgumentException e) {
-            return Optional.empty();
-        }
+        // Check the set first — avoids exception-driven control flow on the hot path.
+        // valueOf() is only called when the name is known to be valid.
+        if (!isSensitive(value)) return Optional.empty();
+        return Optional.of(valueOf(value));
     }
 }
