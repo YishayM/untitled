@@ -1,28 +1,51 @@
-version: '3.9'
+# docker-compose.yml
+# Starts PostgreSQL and the application together.
+#
+# Usage:
+#   docker-compose up --build          # build image + start both services
+#   docker-compose up -d postgres      # start DB only (for local ./gradlew bootRun)
+#   docker-compose down -v             # stop + remove containers AND the DB volume
 
 services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: flowsecurity
-      POSTGRES_USER: flowsecurity
-      POSTGRES_PASSWORD: flowsecurity
+      POSTGRES_DB:       dataprocessing
+      POSTGRES_USER:     dataprocessing
+      POSTGRES_PASSWORD: dataprocessing
     ports:
       - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data   # persist data across restarts
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flowsecurity"]
+      test: ["CMD-SHELL", "pg_isready -U dataprocessing -d dataprocessing"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
 
+  # ── Application ─────────────────────────────────────────────────────────────
   app:
     build: .
     ports:
       - "8080:8080"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/flowsecurity
-      SPRING_DATASOURCE_USERNAME: flowsecurity
-      SPRING_DATASOURCE_PASSWORD: flowsecurity
+      SPRING_DATASOURCE_URL:      jdbc:postgresql://postgres:5432/dataprocessing
+      SPRING_DATASOURCE_USERNAME: dataprocessing
+      SPRING_DATASOURCE_PASSWORD: dataprocessing
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
