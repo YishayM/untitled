@@ -5,12 +5,15 @@ import com.dataprocessing.domain.SensitiveClassification;
 import com.dataprocessing.domain.SensorEvent;
 import com.dataprocessing.domain.TripleKey;
 import com.dataprocessing.repository.SeenTriplesRepository;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -23,19 +26,28 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class SensitiveDataAlertEngineTest {
 
+    private static final Instant FIXED_NOW = Instant.parse("2026-03-10T10:00:00Z");
+
     @Mock NoveltyCache noveltyCache;
     @Mock SeenTriplesRepository seenTriplesRepository;
     @Mock AlertSeverityResolver severityResolver;
     @Mock StructuredAlertLogger alertLogger;
 
-    @InjectMocks SensitiveDataAlertEngine engine;
+    private SensitiveDataAlertEngine engine;
+
+    @BeforeEach
+    void setUp() {
+        Clock fixedClock = Clock.fixed(FIXED_NOW, ZoneOffset.UTC);
+        engine = new SensitiveDataAlertEngine(
+                noveltyCache, seenTriplesRepository, severityResolver, alertLogger, fixedClock);
+    }
 
     // -------------------------------------------------------------------------
     // Happy path
     // -------------------------------------------------------------------------
 
     @Test
-    void novelSensitiveTriple_logsAlert() {
+    void novelSensitiveTriple_logsAlertWithDetectionTimestamp() {
         var event = new SensorEvent("ts", "users", "payment",
                 Map.of("firstName", "FIRST_NAME"));
 
@@ -45,9 +57,10 @@ class SensitiveDataAlertEngineTest {
 
         engine.process("acct-1", event);
 
+        // Verify the exact detection timestamp from the injected fixed clock
         verify(alertLogger).logAlert(
                 eq("acct-1"), eq("users"), eq("payment"),
-                eq(SensitiveClassification.FIRST_NAME), eq(Severity.MEDIUM), any());
+                eq(SensitiveClassification.FIRST_NAME), eq(Severity.MEDIUM), eq(FIXED_NOW));
         verify(noveltyCache).markSeen(any());
     }
 
@@ -82,7 +95,7 @@ class SensitiveDataAlertEngineTest {
 
         engine.process("acct-1", event);
 
-        // Cache should be warmed even on conflict so next event hits fast-path
+        // Cache is always warmed after the DB decision — symmetric across both branches
         verify(noveltyCache).markSeen(any());
         verify(alertLogger, never()).logAlert(any(), any(), any(), any(), any(), any());
     }
@@ -93,8 +106,9 @@ class SensitiveDataAlertEngineTest {
 
     @Test
     void nonSensitiveClassification_skipsEverything() {
+        // Use strings that are clearly not classification names
         var event = new SensorEvent("ts", "a", "b",
-                Map.of("count", "NUMBER", "eventDate", "DATE"));
+                Map.of("x", "not-a-classification", "y", "IGNORED"));
 
         engine.process("acct-1", event);
 
@@ -110,9 +124,9 @@ class SensitiveDataAlertEngineTest {
     @Test
     void mixedValues_onlySensitiveKeysAlert() {
         var event = new SensorEvent("ts", "a", "b", Map.of(
-                "firstName", "FIRST_NAME",           // sensitive
-                "ssn",       "SOCIAL_SECURITY_NUMBER", // sensitive
-                "price",     "NUMBER"                 // not sensitive
+                "firstName", "FIRST_NAME",              // sensitive
+                "ssn",       "SOCIAL_SECURITY_NUMBER",  // sensitive
+                "price",     "not-a-classification"     // not sensitive
         ));
 
         when(noveltyCache.contains(any())).thenReturn(false);

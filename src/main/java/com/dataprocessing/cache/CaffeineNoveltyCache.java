@@ -17,6 +17,7 @@ public class CaffeineNoveltyCache implements NoveltyCache {
 
     private final Cache<TripleKey, Boolean> store = Caffeine.newBuilder()
             .maximumSize(100_000)
+            .recordStats()  // exposes hit rate, eviction count — observable via CacheStats
             .build();
 
     @Override

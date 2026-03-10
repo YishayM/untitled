@@ -14,10 +14,14 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
+// Injected at the HTTP boundary so adversarial events cannot starve the worker pool
+// with thousands of field-level classifications per event.
+
 @RestController
 public class EventIngestionController {
 
     private static final Logger log = LoggerFactory.getLogger(EventIngestionController.class);
+    private static final int MAX_VALUES_PER_EVENT = 100;
 
     private final IngestionQueue ingestionQueue;
 
@@ -34,6 +38,13 @@ public class EventIngestionController {
         if (accountId == null) {
             log.warn("Rejecting request: accountId attribute is missing — interceptor may not have run");
             return ResponseEntity.badRequest().build();
+        }
+        for (var event : events) {
+            if (event.values().size() > MAX_VALUES_PER_EVENT) {
+                log.warn("Rejecting batch: event from source={} has {} values, exceeds limit of {}",
+                        event.source(), event.values().size(), MAX_VALUES_PER_EVENT);
+                return ResponseEntity.badRequest().build();
+            }
         }
         boolean accepted = ingestionQueue.offer(new IncomingBatch(accountId, events));
         if (!accepted) {
