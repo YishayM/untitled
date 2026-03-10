@@ -22,6 +22,7 @@ public class AccountIdInterceptor implements HandlerInterceptor {
                     "X-Account-ID header is required");
             return false;
         }
+        request.setAttribute("accountId", accountId);
         return true;
     }
 }

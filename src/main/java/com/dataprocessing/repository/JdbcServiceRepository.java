@@ -21,7 +21,7 @@ public class JdbcServiceRepository implements ServiceRepository {
                 INSERT INTO services (account_id, service_name, is_public, updated_at)
                 VALUES (?, ?, ?, NOW())
                 ON CONFLICT (account_id, service_name)
-                DO UPDATE SET is_public = EXCLUDED.is_public, updated_at = NOW()
+                DO UPDATE SET is_public = EXCLUDED.is_public, updated_at = EXCLUDED.updated_at
                 """,
                 accountId, serviceName, isPublic);
     }

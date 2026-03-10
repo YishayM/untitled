@@ -135,3 +135,15 @@ The `seen_triples` composite PK is the exactly-once guarantee.
 ## Design Notes
 
 See [DESIGN.md](DESIGN.md) for full architecture decisions and trade-offs.
+
+---
+
+## Decisions
+
+### PR2: Domain model, service repository, PUT /services API
+- **ServiceCache uses ConcurrentHashMap (not Caffeine):** Caffeine eviction would silently miss-as-private — incorrect. Services table is small and bounded; an unbounded map is safer here.
+- **Write-through cache with putIfAbsent in warmup:** Warmup uses `putIfAbsent` to avoid overwriting a concurrent `PUT /services` write that raced with the DB snapshot read.
+
+### PR3: Async ingestion pipeline
+- **ApplicationRunner for worker startup:** Guarantees `ServiceCacheWarmup` completes before first event is processed — no race on services cache at boot.
+- **503 on queue full (offer=false):** Tomcat thread never blocks on processing; sensor handles backpressure via retry.
