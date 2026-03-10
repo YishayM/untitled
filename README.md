@@ -22,12 +22,17 @@ Alerts appear as structured JSON log lines. No HTTP endpoint for alerts — the 
 ## Run With Docker
 
 ```bash
-./gradlew bootJar
 docker-compose up --build
 ```
 
+The Dockerfile uses a multi-stage build — no pre-built jar required.
 App starts on port 8080. PostgreSQL starts on 5432.
-Schema is loaded automatically on startup.
+Schema is loaded automatically on startup (`spring.sql.init.mode=always`).
+
+To start only the database (for local development with `./gradlew bootRun`):
+```bash
+docker-compose up -d postgres
+```
 
 ---
 
@@ -71,10 +76,11 @@ X-Account-ID: <account-id>
 Returns:
 ```json
 {
-  "nodes": [{ "id": "users", "label": "users", "isPublic": false }],
-  "edges": [{ "from": "users", "to": "payment", "classifications": ["FIRST_NAME"] }]
+  "nodes": [{ "id": "users", "label": "users" }],
+  "edges": [{ "from": "users", "to": "payment", "label": "CREDIT_CARD_NUMBER,FIRST_NAME" }]
 }
 ```
+Edge `label` is the sorted comma-separated list of classifications observed on that flow.
 
 ---
 
@@ -135,3 +141,23 @@ The `seen_triples` composite PK is the exactly-once guarantee.
 ## Design Notes
 
 See [DESIGN.md](DESIGN.md) for full architecture decisions and trade-offs.
+
+---
+
+## Decisions
+
+### PR2: Domain model, service repository, PUT /services API
+- **ServiceCache uses ConcurrentHashMap (not Caffeine):** Caffeine eviction would silently miss-as-private — incorrect. Services table is small and bounded; an unbounded map is safer here.
+- **Write-through cache with putIfAbsent in warmup:** Warmup uses `putIfAbsent` to avoid overwriting a concurrent `PUT /services` write that raced with the DB snapshot read.
+
+### PR3: Async ingestion pipeline
+- **ApplicationRunner for worker startup:** Guarantees `ServiceCacheWarmup` completes before first event is processed — no race on services cache at boot.
+- **503 on queue full (offer=false):** Tomcat thread never blocks on processing; sensor handles backpressure via retry.
+
+### PR4: Alert engine — exactly-once sensitive data flow detection
+- **DB constraint is the exactly-once guarantee, not the cache:** `INSERT ON CONFLICT DO NOTHING` returns 0 or 1 atomically — only the thread that gets 1 fires the alert. Cache is a fast-path optimisation, not the authority.
+- **`markSeen` called unconditionally after DB decision (before alert):** Both the conflict and inserted branches warm the cache at the same point, eliminating asymmetry. Timestamp is stamped at detection entry via injected `Clock`, not after DB+severity latency.
+
+### PR5: GET /graph — vis.js service data-flow graph
+- **Grouping in Java, not SQL:** One row per (source, destination, classification) triple; classifications aggregated into `EnumSet` in Java. Avoids `array_agg` dialect differences and keeps SQL readable.
+- **`LinkedHashSet` for node order, sorted label for edge label:** Encounter-order nodes and alphabetically-sorted classification labels make the response body deterministic and diff-friendly.

@@ -293,4 +293,85 @@ class E2ETest {
         assertThat(nodes).anyMatch(n -> ((Map<?, ?>) n).get("label").toString().contains("svc-b"));
         assertThat(edges).isNotEmpty();
     }
+
+    // -------------------------------------------------------------------------
+    // Test 7: cross-account isolation — public flag in account A must not
+    // affect severity for the same service name in account B.
+    //
+    // Scenario:
+    //   acct-A marks "shared-svc" as public → HIGH alerts for acct-A
+    //   acct-B never marks "shared-svc" as public → MEDIUM alerts for acct-B
+    // -------------------------------------------------------------------------
+
+    @Test
+    void publicFlagInOneAccount_doesNotAffectAnotherAccount(CapturedOutput output) {
+        String accountA = accountId;                          // the per-test UUID account
+        String accountB = "acct-" + UUID.randomUUID();       // a second distinct account
+
+        // Mark "shared-svc" public only for account A
+        markPublicForAccount("shared-svc", true, accountA);
+
+        // Account A: send sensitive event involving shared-svc → expect HIGH
+        postEventsForAccount(
+                List.of(event("upstream", "shared-svc", Map.of("cc", "CREDIT_CARD_NUMBER"))),
+                accountA
+        );
+
+        awaitAlertForAccount(output, "CREDIT_CARD_NUMBER", accountA);
+
+        assertThat(output.toString())
+                .contains(accountA)
+                .contains("HIGH");
+
+        // Account B: send identical event — shared-svc is NOT public for B → expect MEDIUM
+        postEventsForAccount(
+                List.of(event("upstream", "shared-svc", Map.of("cc", "CREDIT_CARD_NUMBER"))),
+                accountB
+        );
+
+        awaitAlertForAccount(output, "CREDIT_CARD_NUMBER", accountB);
+
+        // Find the alert line that belongs to account B and assert it is MEDIUM
+        boolean accountBAlertIsMedium = output.toString().lines()
+                .filter(line -> line.contains("SECURITY_ALERT")
+                        && line.contains(accountB)
+                        && line.contains("CREDIT_CARD_NUMBER"))
+                .anyMatch(line -> line.contains("MEDIUM") && !line.contains("HIGH"));
+
+        assertThat(accountBAlertIsMedium)
+                .as("Alert for account B must be MEDIUM — public flag from account A must not leak")
+                .isTrue();
+    }
+
+    // -------------------------------------------------------------------------
+    // Helpers for cross-account tests (accept explicit accountId)
+    // -------------------------------------------------------------------------
+
+    private void markPublicForAccount(String serviceName, boolean isPublic, String account) {
+        HttpHeaders h = new HttpHeaders();
+        h.set("X-Account-ID", account);
+        rest.exchange(
+                "/services/" + serviceName + "?public=" + isPublic,
+                HttpMethod.PUT,
+                new HttpEntity<>(null, h),
+                Void.class
+        );
+    }
+
+    private ResponseEntity<Void> postEventsForAccount(List<Map<String, Object>> events, String account) {
+        HttpHeaders h = new HttpHeaders();
+        h.set("X-Account-ID", account);
+        h.setContentType(MediaType.APPLICATION_JSON);
+        return rest.postForEntity("/events", new HttpEntity<>(events, h), Void.class);
+    }
+
+    private void awaitAlertForAccount(CapturedOutput output, String classification, String account) {
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(100))
+                .untilAsserted(() -> assertThat(output.toString())
+                        .contains("SECURITY_ALERT")
+                        .contains(account)
+                        .contains(classification));
+    }
 }

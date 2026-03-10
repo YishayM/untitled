@@ -48,18 +48,22 @@
 
       3. INSERT INTO seen_triples (account_id, source, destination, classification)
          ON CONFLICT DO NOTHING
-         → inserted = 0  → another thread/node won → skip
-         → inserted = 1  → first time, continue
+         → inserted = 0 or 1 (atomic)
 
-      4. Lookup services ConcurrentHashMap for source and destination
+      4. Update Caffeine cache (markSeen) unconditionally — symmetric for both branches
+         Conflict branch: cache warm prevents repeated DB round-trips for the same triple
+         Inserted branch: normal warm-up before alert emission
+
+      5. If inserted = 0  → another thread/node won; cache already warmed → skip
+
+      6. Lookup services ConcurrentHashMap for source and destination
          → either is_public=true  → severity = HIGH
          → both is_public=false   → severity = MEDIUM
 
-      5. LOG alert (JSON, one line):
+      7. LOG alert (JSON, one line):
          {"type":"SECURITY_ALERT","account_id":"...","source":"...","destination":"...",
           "classification":"...","severity":"HIGH|MEDIUM","detected_at":"<ISO-8601>"}
-
-      6. Update Caffeine cache → subsequent duplicates never reach DB
+         detected_at stamped at entry to step 3 (before DB latency) via injected Clock
 
 [Ops Client]
   PUT /services/{name}?public=true  +  X-Account-ID
@@ -125,11 +129,12 @@ CREATE TABLE IF NOT EXISTS seen_triples (
 | Failure | Behavior | Acceptable? |
 |---|---|---|
 | Queue full (50k cap reached) | POST /events returns 503; sensor retries | Yes — sensor retry expected; protects worker pool |
-| DB down during novelty check | Worker retries with backoff; alert delayed | Yes — eventual consistency acceptable |
+| DB down during novelty check | Worker catches RuntimeException, logs error, and drops the in-flight batch; no retry | Acknowledged trade-off — dead-letter queue deferred |
 | Two workers race on same triple | DB ON CONFLICT DO NOTHING — one inserts, one skips; exactly one alert | Yes — exactly-once guaranteed by DB constraint |
 | Process restart | Caffeine cache lost; services cache rewarmed from DB; seen_triples survives in DB | Yes — DB is source of truth; cache is optimization only |
 | Unknown classification arrives | Treated as non-sensitive; no alert fired | Yes — per spec, only defined types are sensitive |
 | X-Account-ID header missing | 400 Bad Request | Yes |
+| Event with >100 value fields | 400 Bad Request at HTTP boundary (before queuing) | Yes — prevents worker starvation from adversarially wide events |
 | services ConcurrentHashMap stale by milliseconds after PUT | Next alert after PUT may use old flag | Yes — synchronous update on write path minimizes window |
 | GET /graph on large account | Full table scan on seen_triples for account | Acceptable for this scale; add index if needed |
 
