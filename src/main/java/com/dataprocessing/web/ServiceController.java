@@ -27,7 +27,7 @@ public class ServiceController {
     @PutMapping("/services/{serviceName}")
     public ResponseEntity<Void> setVisibility(
             @PathVariable String serviceName,
-            @RequestParam boolean isPublic,
+            @RequestParam("public") boolean isPublic,
             HttpServletRequest request) {
 
         String accountId = (String) request.getAttribute("accountId");
