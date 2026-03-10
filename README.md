@@ -1,126 +1,137 @@
-# untitled
+# Flow Security — Event Ingestion Service
 
-Java starter project. Nothing fancy here — just the skeleton.
-Was created from IntelliJ default template. We use it as a base for experiments or quick POCs.
-
----
-
-## What Is This
-
-Simple Java application with Gradle build system.
-Entry point is `Main.java`, it print hello and loop five times. That's it.
-
-The point is not the code — the point is the build setup and the project structure is ready to go.
+Detects sensitive data flows between services and fires alerts.
+Built with Java 21, Spring Boot MVC, PostgreSQL.
 
 ---
 
-## Requirements
+## What It Does
 
-Before you start, make sure you have:
+Receives events from a sensor. Each event describes data flowing between two services.
+When a sensitive data type (FIRST_NAME, LAST_NAME, CREDIT_CARD_NUMBER, SOCIAL_SECURITY_NUMBER)
+flows from service A to service B for the first time, the system fires an alert — exactly once.
 
-- **JDK 17+** — anything lower and Gradle will complain, trust me
-- **Gradle 9.x** — wrapper is included, you don't need to install separately
-- **IntelliJ IDEA** (recommended) — project files are already there under `.idea/`
+Alert severity:
+- **MEDIUM** — new sensitive flow, neither service is public
+- **HIGH** — new sensitive flow, one of the services is marked public
 
-If you run it from terminal that's also fine, see below.
-
----
-
-## How To Run
-
-**From IntelliJ:**
-Just open the project and press Run. IntelliJ will detect the Gradle config automatically.
-
-**From terminal:**
-```bash
-./gradlew run
-```
-
-On Windows:
-```cmd
-gradlew.bat run
-```
-
-If you get permission error on Linux/Mac:
-```bash
-chmod +x gradlew
-```
+Alerts appear as structured JSON log lines. No HTTP endpoint for alerts — the log is the delivery.
 
 ---
 
-## How To Build
+## Run With Docker
 
 ```bash
-./gradlew build
+./gradlew bootJar
+docker-compose up --build
 ```
 
-Output goes to `build/` directory. The jar will be under `build/libs/`.
+App starts on port 8080. PostgreSQL starts on 5432.
+Schema is loaded automatically on startup.
 
 ---
 
-## How To Run Tests
+## API
+
+### Ingest events (sensor)
+```
+POST /events
+X-Account-ID: <account-id>
+Content-Type: application/json
+
+[
+  {
+    "date": "1610293274000",
+    "source": "users",
+    "destination": "payment",
+    "values": {
+      "firstName": "FIRST_NAME",
+      "price": "NUMBER"
+    }
+  }
+]
+```
+Returns `202 Accepted` immediately. Processing is async.
+
+---
+
+### Mark service as public/private (ops)
+```
+PUT /services/{serviceName}?public=true
+X-Account-ID: <account-id>
+```
+
+---
+
+### Get service graph (vis.js compatible)
+```
+GET /graph
+X-Account-ID: <account-id>
+```
+Returns:
+```json
+{
+  "nodes": [{ "id": "users", "label": "users", "isPublic": false }],
+  "edges": [{ "from": "users", "to": "payment", "classifications": ["FIRST_NAME"] }]
+}
+```
+
+---
+
+## Alert Log Format
+
+One JSON line per alert, written to stdout:
+```json
+{
+  "type": "SECURITY_ALERT",
+  "account_id": "acct-1",
+  "source": "users",
+  "destination": "payment",
+  "classification": "FIRST_NAME",
+  "severity": "MEDIUM",
+  "detected_at": "2026-03-10T10:00:00Z"
+}
+```
+
+---
+
+## Sensitive Classifications
+
+| Classification | Sensitive |
+|---|---|
+| FIRST_NAME | yes |
+| LAST_NAME | yes |
+| CREDIT_CARD_NUMBER | yes |
+| SOCIAL_SECURITY_NUMBER | yes |
+| DATE | no |
+| NUMBER | no |
+
+---
+
+## Run Tests
 
 ```bash
 ./gradlew test
 ```
 
-Tests use JUnit 5 (Jupiter). Test results are in `build/reports/tests/test/index.html` — open in browser if you want nice output.
-
-There are no tests yet in this project. Add them under `src/test/java/`.
+Requires Docker (Testcontainers spins up PostgreSQL automatically).
 
 ---
 
-## Project Structure
+## Schema
 
-```
-untitled/
-├── src/
-│   └── main/
-│       └── java/
-│           └── org/
-│               └── Main.java       # entry point
-├── build.gradle.kts                # build config, dependencies here
-├── settings.gradle.kts             # project name
-└── gradlew                         # use this, not system gradle
+Two tables. Schema loads on startup — no migration tool.
+
+```sql
+services      (account_id, service_name) PK → is_public, updated_at
+seen_triples  (account_id, source, destination, classification) PK → first_seen_at
 ```
 
----
-
-## Adding Dependencies
-
-Open `build.gradle.kts` and add to the `dependencies` block:
-
-```kotlin
-dependencies {
-    implementation("com.google.guava:guava:32.1.3-jre")  // example
-}
-```
-
-All dependencies resolve from Maven Central. No private registry configured here.
+The `seen_triples` composite PK is the exactly-once guarantee.
+`INSERT ON CONFLICT DO NOTHING` is the atomic deduplication guard.
 
 ---
 
-## Common Issues
+## Design Notes
 
-**`JAVA_HOME` not set** — set it to your JDK installation. On Mac with SDKMAN:
-```bash
-export JAVA_HOME=$(java -XshowSettings:property -version 2>&1 | grep java.home | awk '{print $3}')
-```
-
-**Gradle daemon timeout** — just run again, it will start fresh.
-
-**IntelliJ shows red code after clone** — go to `File > Sync Project with Gradle Files`. Always solves it.
-
----
-
-## Notes
-
-- The `.idea/` folder is committed intentionally — makes onboarding faster for the team.
-- Do not commit the `build/` directory, it is in `.gitignore` already.
-- If you need to change Java version, update `build.gradle.kts` — look for `sourceCompatibility`.
-
----
-
-## Who Maintains This
-
-Yishay Merzbach — ping me if something broken or you have question.
+See [DESIGN.md](DESIGN.md) for full architecture decisions and trade-offs.
