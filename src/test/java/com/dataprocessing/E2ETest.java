@@ -25,12 +25,17 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * End-to-end tests. All scenarios are written upfront (TDD).
  * These tests fail until each feature is implemented in subsequent PRs.
+ *
+ * Isolation strategy: each test generates a unique accountId so that
+ * DB rows and log lines from one test never bleed into another,
+ * regardless of execution order or async timing.
  *
  * Scenarios:
  *   1. Sensitive triple → MEDIUM alert logged exactly once
@@ -55,18 +60,15 @@ class E2ETest {
         registry.add("spring.datasource.password", postgres::getPassword);
     }
 
-    @Autowired
-    TestRestTemplate rest;
+    @Autowired TestRestTemplate rest;
+    @Autowired JdbcTemplate jdbc;
 
-    @Autowired
-    JdbcTemplate jdbc;
-
-    private static final String ACCOUNT = "acct-test";
+    // Unique per test — prevents row contamination and log-capture cross-pollution
+    private String accountId;
 
     @BeforeEach
-    void cleanDb() {
-        jdbc.execute("DELETE FROM seen_triples");
-        jdbc.execute("DELETE FROM services");
+    void setUp() {
+        accountId = "acct-" + UUID.randomUUID();
     }
 
     // -------------------------------------------------------------------------
@@ -75,7 +77,7 @@ class E2ETest {
 
     private HttpHeaders headers() {
         HttpHeaders h = new HttpHeaders();
-        h.set("X-Account-ID", ACCOUNT);
+        h.set("X-Account-ID", accountId);
         h.setContentType(MediaType.APPLICATION_JSON);
         return h;
     }
@@ -106,16 +108,20 @@ class E2ETest {
         );
     }
 
-    private void awaitAlert(CapturedOutput output) {
+    private void awaitAlert(CapturedOutput output, String classification) {
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
                 .pollInterval(Duration.ofMillis(100))
-                .untilAsserted(() -> assertThat(output.toString()).contains("SECURITY_ALERT"));
+                .untilAsserted(() -> assertThat(output.toString())
+                        .contains("SECURITY_ALERT")
+                        .contains(accountId)
+                        .contains(classification));
     }
 
     private long countAlerts(CapturedOutput output, String source, String destination, String classification) {
         return output.toString().lines()
                 .filter(line -> line.contains("SECURITY_ALERT")
+                        && line.contains(accountId)
                         && line.contains(source)
                         && line.contains(destination)
                         && line.contains(classification))
@@ -131,13 +137,13 @@ class E2ETest {
         ResponseEntity<Void> response = postEvents(List.of(
                 event("users", "payment", Map.of(
                         "firstName", "FIRST_NAME",
-                        "price",     "NUMBER"        // non-sensitive — no alert for this key
+                        "price",     "NUMBER"   // non-sensitive — must not alert
                 ))
         ));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
 
-        awaitAlert(output);
+        awaitAlert(output, "FIRST_NAME");
 
         assertThat(output.toString())
                 .contains("SECURITY_ALERT")
@@ -160,7 +166,7 @@ class E2ETest {
                 event("payment", "stripe.com", Map.of("credit_card", "CREDIT_CARD_NUMBER"))
         ));
 
-        awaitAlert(output);
+        awaitAlert(output, "CREDIT_CARD_NUMBER");
 
         assertThat(output.toString())
                 .contains("SECURITY_ALERT")
@@ -175,7 +181,7 @@ class E2ETest {
     // -------------------------------------------------------------------------
 
     @Test
-    void duplicateEvents_fireAlertExactlyOnce(CapturedOutput output) throws InterruptedException {
+    void duplicateEvents_fireAlertExactlyOnce(CapturedOutput output) {
         var events = List.of(
                 event("auth", "db", Map.of("ssn", "SOCIAL_SECURITY_NUMBER"))
         );
@@ -184,10 +190,18 @@ class E2ETest {
         postEvents(events);
         postEvents(events);
 
-        awaitAlert(output);
+        awaitAlert(output, "SOCIAL_SECURITY_NUMBER");
 
-        // Extra wait to let any spurious duplicates appear
-        Thread.sleep(1500);
+        // Drain async workers: wait until seen_triples row count is stable
+        Awaitility.await()
+                .atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(200))
+                .untilAsserted(() -> {
+                    int rows = jdbc.queryForObject(
+                            "SELECT COUNT(*) FROM seen_triples WHERE account_id = ?",
+                            Integer.class, accountId);
+                    assertThat(rows).isEqualTo(1);
+                });
 
         long count = countAlerts(output, "auth", "db", "SOCIAL_SECURITY_NUMBER");
         assertThat(count).isEqualTo(1);
@@ -195,10 +209,12 @@ class E2ETest {
 
     // -------------------------------------------------------------------------
     // Test 4: non-sensitive types → no alert
+    // Assertion uses DB state (seen_triples empty) as the completion signal
+    // instead of Thread.sleep, to avoid vacuous "not yet run" passes.
     // -------------------------------------------------------------------------
 
     @Test
-    void nonSensitiveClassifications_doNotFireAlert(CapturedOutput output) throws InterruptedException {
+    void nonSensitiveClassifications_doNotFireAlert(CapturedOutput output) {
         postEvents(List.of(
                 event("analytics", "warehouse", Map.of(
                         "count",     "NUMBER",
@@ -206,7 +222,17 @@ class E2ETest {
                 ))
         ));
 
-        Thread.sleep(2000);
+        // Poll until worker has run: if non-sensitive, seen_triples stays empty.
+        Awaitility.await()
+                .during(Duration.ofSeconds(2))
+                .atMost(Duration.ofSeconds(4))
+                .pollInterval(Duration.ofMillis(200))
+                .untilAsserted(() -> {
+                    int rows = jdbc.queryForObject(
+                            "SELECT COUNT(*) FROM seen_triples WHERE account_id = ?",
+                            Integer.class, accountId);
+                    assertThat(rows).isZero();
+                });
 
         assertThat(output.toString()).doesNotContain("SECURITY_ALERT");
     }
@@ -224,7 +250,7 @@ class E2ETest {
                 event("gateway", "internal-svc", Map.of("lastName", "LAST_NAME"))
         ));
 
-        awaitAlert(output);
+        awaitAlert(output, "LAST_NAME");
 
         assertThat(output.toString())
                 .contains("SECURITY_ALERT")
@@ -235,6 +261,8 @@ class E2ETest {
 
     // -------------------------------------------------------------------------
     // Test 6: GET /graph returns vis.js-compatible nodes + edges
+    // Graph is built from seen_triples, so we wait for the alert (which confirms
+    // the triple was persisted) before querying.
     // -------------------------------------------------------------------------
 
     @Test
@@ -243,20 +271,18 @@ class E2ETest {
                 event("svc-a", "svc-b", Map.of("cc", "CREDIT_CARD_NUMBER"))
         ));
 
-        // Wait for async processing to persist to seen_triples
-        awaitAlert(output);
+        awaitAlert(output, "CREDIT_CARD_NUMBER");
 
-        ResponseEntity<Map> response = rest.exchange(
+        ResponseEntity<Map<String, Object>> response = rest.exchange(
                 "/graph",
                 HttpMethod.GET,
                 new HttpEntity<>(headers()),
-                Map.class
+                (Class<Map<String, Object>>) (Class<?>) Map.class
         );
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
 
-        @SuppressWarnings("unchecked")
-        Map<String, Object> body = (Map<String, Object>) response.getBody();
+        Map<String, Object> body = response.getBody();
         assertThat(body).containsKey("nodes");
         assertThat(body).containsKey("edges");
 
